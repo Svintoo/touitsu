@@ -1,0 +1,16 @@
+.zig-cache
+zig-pkg
+zig-out
+# Local credentials, reader history, and personal preferences
+.env
+.env.*
+anki-settings.json
+appearance-settings.json
+font-settings.json
+reader.json
+hooks.txt
+__pycache__/
+*.pyc
+reader-history.json
+reader-background.image
+appearance.json

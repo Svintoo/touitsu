@@ -1,0 +1,2 @@
+Place Yomitan v3 term dictionary ZIP files in this folder.
+Touitsu scans this folder at startup. Restart after adding or removing ZIPs.

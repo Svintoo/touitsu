@@ -1,0 +1,3 @@
+[submodule "src/third_party/Textractor"]
+	path = src/third_party/Textractor
+	url = https://github.com/Artikash/Textractor

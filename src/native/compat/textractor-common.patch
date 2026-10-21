@@ -1,0 +1,17 @@
+diff --git a/include/common.h b/include/common.h
+index e1805e4..7273149 100644
+--- a/include/common.h
++++ b/include/common.h
+@@ -88,10 +88,10 @@ void SpawnThread(const F& f) // works in DllMain unlike std thread
+ 	}, copy, 0, nullptr));
+ }
+ 
++inline BYTE DUMMY_BUFFER[100];
+ inline struct
+ {
+-	inline static BYTE DUMMY[100];
+-	template <typename T> operator T*() { static_assert(sizeof(T) < sizeof(DUMMY)); return (T*)DUMMY; }
++	template <typename T> operator T*() { static_assert(sizeof(T) < sizeof(DUMMY_BUFFER)); return (T*)DUMMY_BUFFER; }
+ } DUMMY;
+ 
+ inline auto Swallow = [](auto&&...) {};
