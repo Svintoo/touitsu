@@ -10,12 +10,13 @@ namespace {
 struct InternetHandle { HINTERNET h; ~InternetHandle() { if (h) WinHttpCloseHandle(h); } };
 bool allowedHost(const std::wstring& host) {
     return host == L"jisho.org" || host == L"www.jisho.org" || host == L"assets.languagepod101.com" ||
+        host == L"cdn.innovativelanguage.com" ||
         (host.size() > 15 && host.compare(host.size() - 15, 15, L".cloudfront.net") == 0);
 }
 }
 
 // Called only on the pronunciation worker, after the user's opt-in.
-extern "C" int touitsu_pronunciation_get(const wchar_t* url, char** output, size_t* length) {
+static int pronunciationGet(const wchar_t* url, char** output, size_t* length, unsigned redirects) {
     *output = nullptr; *length = 0;
     URL_COMPONENTS parts{};
     parts.dwStructSize = sizeof(parts);
@@ -44,7 +45,20 @@ extern "C" int touitsu_pronunciation_get(const wchar_t* url, char** output, size
         !WinHttpReceiveResponse(request.h, nullptr)) return 2;
     DWORD status = 0, status_length = sizeof(status);
     if (!WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_length, WINHTTP_NO_HEADER_INDEX) || status != 200) return 3;
+        WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_length, WINHTTP_NO_HEADER_INDEX)) return 3;
+    if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+        if (redirects >= 3) return 3;
+        DWORD location_bytes = 0;
+        WinHttpQueryHeaders(request.h, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX,
+            nullptr, &location_bytes, WINHTTP_NO_HEADER_INDEX);
+        if (!location_bytes || location_bytes > 8192) return 3;
+        std::wstring location(location_bytes / sizeof(wchar_t) + 1, L'\0');
+        if (!WinHttpQueryHeaders(request.h, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX,
+            &location[0], &location_bytes, WINHTTP_NO_HEADER_INDEX)) return 3;
+        // Each redirect is checked again for HTTPS, port, credentials, and allowed host.
+        return pronunciationGet(location.c_str(), output, length, redirects + 1);
+    }
+    if (status != 200) return 3;
     const auto started = GetTickCount64();
     std::string response;
     for (;;) {
@@ -60,6 +74,9 @@ extern "C" int touitsu_pronunciation_get(const wchar_t* url, char** output, size
     memcpy(copy, response.data(), response.size()); copy[response.size()] = 0;
     *output = copy; *length = response.size();
     return 0;
+}
+extern "C" int touitsu_pronunciation_get(const wchar_t* url, char** output, size_t* length) {
+    return pronunciationGet(url, output, length, 0);
 }
 extern "C" void touitsu_pronunciation_free(char* data) { free(data); }
 extern "C" void touitsu_pronunciation_stop() { mciSendStringW(L"stop touitsuPronunciation", nullptr, 0, nullptr); }

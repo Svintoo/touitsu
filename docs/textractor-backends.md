@@ -1,5 +1,17 @@
 # x86 and x64 game hooking
 
+Saved games are checked at startup and every two seconds while saved hooks exist.
+An executable name is a preliminary filter; auto-attachment requires its full
+path to match the saved game. Each running instance gets one automatic attempt,
+identified by PID and process creation time. A failed attempt or manual detach
+does not trigger automatic retries; a restarted game gets a fresh attempt.
+On connection, the existing saved-hook restoration inserts the game's hook codes.
+
+The per-thread noise guard allows 1,000 messages or 2 MiB per second so ordinary
+Textractor startup diagnostics are accepted. The per-message noise threshold is
+64 KiB of UTF-8, distinct from the capture/preview bound of 8,192 UTF-16 code
+units. Exceeding a noise limit still blocks that thread's further output.
+
 Touitsu remains a 64-bit Windows application. The process list labels targets
 `x86` or `x64`; selecting either uses the matching backend automatically. Both
 architectures can remain attached simultaneously. Saved hooks and hook searches

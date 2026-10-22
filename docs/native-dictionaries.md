@@ -10,6 +10,9 @@ needed for lookup. Dictionaries are supplied by the user; none are bundled.
 2. Start or restart Touitsu. ZIPs are scanned in the background; unchanged
    archives reuse the SQLite cache. No dictionary import form is needed.
 3. Open the Dictionaries sidebar tab for scan status, counts, and lookup priorities.
+   Rank 1 is highest. Each dictionary has an Enable/Disable button; disabling
+   excludes it from lookup results and word matching while retaining its rank.
+   The enabled state is saved by title and survives restarts and ZIP replacement.
 4. Hold Shift over a character in the reader to highlight the longest dictionary
    word beginning there, without holding a mouse button. For example, hovering
    文 in 文字 highlights 文字. Release Shift to keep the selection. The floating dictionary
@@ -110,7 +113,7 @@ and readings, structured glossary text, stored and deflated archives, failed
 replacement rollback, successful replacement, checksum errors, unsupported
 formats, blank queries, image blobs, image-only headwords, import-cache upgrades,
 priorities, and closing/reopening the persistent database. `zig build test-image`
-checks both raster and SVG decoding. `zig test src/dictionary_content.zig` checks
+checks both raster and SVG decoding. `zig test src/components/dictionaries/dictionary_content.zig` checks
 structured text/image ordering. Dictionary/selection tests also cover longest
 matches, deinflection chains, conjugation metadata, source UTF-8 ranges, and
 whole-line/manual selection precedence. To check an existing verification database:
@@ -156,8 +159,8 @@ background unchanged. Limits: 64 MiB source file, 8192 pixels per side, 32 milli
 pixels total. Decoding uses Windows Imaging Component.
 
 This pinned Knots version has file drops through `Frame.droppedPaths()`.
-`src/drops.zig` supplies the UI drop-zone component; `src/background_image.zig`
-handles settings and rendering, and `src/image_decode.zig` wraps the native
+`src/ui/drops.zig` supplies the UI drop-zone component; `src/components/appearance/background_image.zig`
+handles settings and rendering, and `src/platform/image_decode.zig` wraps the native
 Windows decoder. `zig build test-image` validates PNG decoding and invalid input.
 Sidebar icon insertion comments are beside the items in `SidebarTabs.render`
 in `src/main.zig`.
@@ -176,6 +179,20 @@ Monochrome ash, Nord frost, Rose mist, and Warm sand. The eight additional theme
 files are kept under `src/themes` with upstream attribution.
 
 ## Reading direction
+
+The reader exposes all retained history as one continuous document, within the
+existing approximate 500,000-word, 8 MiB, and 100,000-line limits. There is no
+separate character/page display limit. `reader_document.zig` caches each entry's
+layout and renders a viewport with overscan, preserving the full scroll extent
+and original text for selection. Vertical character cells are also culled outside
+that range. Latest returns to the newest text; incoming text preserves the
+current paragraph position when the reader is away from the latest edge.
+
+Custom glyph layouts use a bounded cache. Accessibility exposes a paragraph text
+run rather than a node for every glyph, keeping small-font/fullscreen layouts
+below Knots' node limit. Character counts are cached until history or count
+options change. Hook events wake the UI immediately; the idle timeout refreshes
+timers and background jobs once per second without an extra forced redraw.
 
 Settings -> Text direction offers Horizontal, Vertical: left to right, and
 Vertical: right to left. Direction persists in `appearance.json`.
@@ -203,15 +220,31 @@ Touitsu starts at its normal windowed size with the native Windows title bar and
 maximize/restore and close controls. Window management uses these native controls.
 The root layout uses the current logical client-area size after resizing.
 
-Knots minimized-frame fix: `src/knots_patches/App.zig` skips UI frame creation
-while either client or framebuffer dimensions are zero. Build copies upstream
-Knots sources to its generated directory and overlays this pinned App.zig,
-leaving the dependency cache unchanged. `zig build test-window` checks zero-size
-and restored/maximized extent handling.
+F11 and Settings > Display toggle Knots' fullscreen display mode, hiding the
+native title bar and covering the monitor. Escape exits fullscreen. Touitsu
+remembers whether the previous mode was maximized or windowed when restoring.
+Reader scrollbar presses own their entire drag until release, including when the
+pointer moves over text. Both horizontal and vertical scrollbar gutters are
+excluded from new reader selection gestures.
 
-The Windows backend overlay in `src/knots_patches/windows_root.zig` delegates
-native caption maximize/restore mouse messages to DefWindowProc. Knots custom
-maximize-button forwarding is restricted to undecorated windows.
+Knots is used without source overlays. `src/platform/window_integration.zig`
+sets the embedded resource icon on the application window using `WM_SETICON`.
+It wraps Knots' frame handler through `Window.setFrameHandler` after the first
+frame, skipping subsequent frames while client or framebuffer dimensions are
+zero. This prevents worker-triggered redraws from entering the UI while minimized.
+On restore, the existing Knots handler consumes the resize and resumes rendering.
+
+A Windows window subclass routes native caption maximize-button mouse messages
+to `DefWindowProcW`, leaving other messages with Knots. The pinned Knots backend
+otherwise intercepts these messages for custom title-bar widgets even when the
+application uses native decorations. This is an application-side workaround,
+not a fix supplied by the framework. Remove it when upstream supports the case.
+
+`zig build test-window` launches a disposable copy of Touitsu, checks both window
+icons, sends repeated paint requests while minimized, cycles restore/maximize,
+and checks clean shutdown. It requires a Windows desktop and working Vulkan
+driver. It tests maximize through system commands; physical caption-button clicks
+and the Windows snap flyout still need a manual check.
 
 ## Textractor shutdown
 

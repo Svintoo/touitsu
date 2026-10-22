@@ -1,6 +1,7 @@
 .zig-cache
 zig-pkg
 zig-out
+/testrelase/
 # Local credentials, reader history, and personal preferences
 .env
 .env.*

@@ -1,6 +1,18 @@
 # Touitsu
 
-A Windows Japanese reader with Textractor hook capture, clipboard capture, offline dictionary lookups, configurable themes, and AnkiConnect integration.
+A 5 in 1 Windows text reader with Textractor hook capture, clipboard capture (for mpv), offline dictionary lookups, configurable themes, and Anki integration.
+Fully vibecoded to be the one stop shop for language learners. Fully native (No electron, webview or js) thanks to Knots ui
+
+# Features
+- Capturing text from 32 and 64 bit games
+- Capturing text from clipboard useful for people mining videos using the Anacreon mpv script
+- AnkiConnect integration
+- Theme customization
+- Dictionary lookups
+- Adding custom fonts and dictionaries
+
+# Mining
+Check out this guide on how to get started over at https://animecards.site/minefromanime/
 
 ## Build
 
@@ -35,8 +47,11 @@ zig build test-anki test-hook-preview test-selection
 ## Dependencies and credits
 
 - [Textractor](https://github.com/Artikash/Textractor), retained as a submodule, and local hook backend adaptations. See its bundled license and [binary provenance](libs/Textractor-PROVENANCE.md).
-- Knots UI and other Zig dependencies listed in [build.zig.zon](build.zig.zon).
-- [SQLite](https://www.sqlite.org/), vendored in `src/third_party/sqlite`.
+- [Knots UI](https://github.com/knots-ui/knots) for the native zig UI rendering
+- other Zig dependencies listed in [build.zig.zon](build.zig.zon).
+- [Yomitan](https://yomitan.wiki/) for inspiring the featureset.
+- [Anacreon](https://anacreondjt.gitlab.io/) for the original texthooker.html page
 - [Jisho](https://jisho.org/) for optional pronunciation lookup.
+- [SQLite](https://www.sqlite.org/).
 
 Dependency licenses remain applicable to their respective components. Local Knots adaptations and themes include license files in their source directories.

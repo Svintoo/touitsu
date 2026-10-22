@@ -10,13 +10,14 @@
 const std = @import("std");
 const knots = @import("knots");
 const ui = @import("ui");
-const tx = @import("textractor.zig");
-const procs = @import("procs.zig");
-const Reader = @import("reader.zig");
-const FontSettings = @import("font_settings.zig");
-const BackgroundImage = @import("background_image.zig");
-const AnkiSettings = @import("anki_settings.zig");
-const hookstore = @import("hookstore.zig");
+const tx = @import("components/textractor/textractor.zig");
+const procs = @import("components/textractor/procs.zig");
+const Reader = @import("components/reader/reader.zig");
+const FontSettings = @import("components/fonts/font_settings.zig");
+const BackgroundImage = @import("components/appearance/background_image.zig");
+const AnkiSettings = @import("components/anki/anki_settings.zig");
+const hookstore = @import("components/textractor/Hookstore.zig");
+const AutoAttach = @import("components/textractor/auto_attach.zig");
 
 const Rect = ui.component.Rect;
 
@@ -42,7 +43,7 @@ const ThreadEntry = struct {
     code: []u8,
     accepted: bool = false,
     reduce_pairs: bool = false,
-    flood: @import("capture_limits.zig").FloodGuard = .{},
+    flood: @import("components/textractor/capture_limits.zig").FloodGuard = .{},
     removed: bool = false,
     lines: std.ArrayList(Line) = .empty,
 
@@ -64,6 +65,9 @@ app: knots.App,
 gpa: std.mem.Allocator,
 store: hookstore.Store,
 proc_list: []procs.Proc = &[_]procs.Proc{},
+auto_attach: AutoAttach = .{},
+last_process_scan_ms: ?i64 = null,
+fullscreen_was_maximized: bool = false,
 show_system_processes: bool = false,
 expanded_process: ?u32 = null,
 attached: std.ArrayList(u32) = .empty,
@@ -85,7 +89,7 @@ hook_draft: std.ArrayList(u8) = .empty,
 hook_clear_pending: bool = false,
 search_draft: std.ArrayList(u8) = .empty,
 search_cp: u32 = 65001,
-search_filters: @import("hook_sample_filter.zig").Options = .{},
+search_filters: @import("components/textractor/hook_sample_filter.zig").Options = .{},
 candidates: std.ArrayList(Candidate) = .empty,
 next_line_id: usize = 0,
 pump_started: bool = false,
@@ -94,17 +98,19 @@ reader: Reader,
 fonts: FontSettings,
 background: BackgroundImage,
 anki: AnkiSettings,
-sidebar_tab: enum { textractor, dictionaries, fonts, theme, settings, anki } = .textractor,
+sidebar_tab: enum { textractor, dictionaries, fonts, theme, settings, anki, about } = .textractor,
+about: @import("components/about/about.zig") = .{},
+window_integration: @import("platform/window_integration.zig") = .{},
 
 const Self = @This();
 
-const SidebarUI = @import("sidebar.zig").Components(Self);
-const TextractorUI = @import("textractor_ui.zig").Components(Self);
+const SidebarUI = @import("ui/sidebar.zig").Components(Self);
+const TextractorUI = @import("components/textractor/textractor_ui.zig").Components(Self);
 const TexthookingSidebar = SidebarUI.Sidebar;
 const ReaderView = SidebarUI.ReaderView;
 const TextractorSettings = TextractorUI.Settings;
 const HookPreview = TextractorUI.HookPreview;
-const input_key = @import("textractor_ui.zig").input_key;
+const input_key = @import("components/textractor/textractor_ui.zig").input_key;
 
 // ---- lifecycle ----
 
@@ -148,6 +154,7 @@ pub fn deinit(self: *Self) void {
     if (self.sel_hint) |h| alloc.free(h.code);
     self.store.deinit();
     procs.free(alloc, self.proc_list);
+    self.auto_attach.deinit();
     alloc.free(self.status);
     self.hook_draft.deinit(self.gpa);
     self.search_draft.deinit(self.gpa);
@@ -157,6 +164,17 @@ pub fn deinit(self: *Self) void {
 }
 
 // ---- state ----
+
+pub fn toggleFullscreen(self: *Self) void {
+    const window = &self.app.main_viewport.window;
+    const mode = window.getDisplayMode();
+    if (mode == .fullscreen) {
+        _ = window.setDisplayMode(if (self.fullscreen_was_maximized) .maximized else .windowed);
+    } else {
+        self.fullscreen_was_maximized = mode == .maximized;
+        if (!window.setDisplayMode(.fullscreen)) self.setStatus("Could not enter fullscreen.", .{});
+    }
+}
 
 pub fn setStatus(self: *Self, comptime fmt: []const u8, args: anytype) void {
     const s = std.fmt.allocPrint(alloc, fmt, args) catch return;
@@ -168,6 +186,15 @@ pub fn refreshProcs(self: *Self) void {
     const fresh = procs.list(alloc) catch return;
     procs.free(alloc, self.proc_list);
     self.proc_list = fresh;
+    for (self.proc_list) |process| {
+        if (!process.attachable or self.isAttached(process.pid) or !AutoAttach.hasSavedName(&self.store, process.name)) continue;
+        const path = procs.exePath(alloc, process.pid) catch continue;
+        defer alloc.free(path);
+        // Match the complete saved path, not just an executable's basename.
+        const first_attempt = self.auto_attach.shouldAttach(&self.store, process, path, self.isAttached(process.pid)) catch continue;
+        if (!first_attempt) continue;
+        self.attach(process.pid) catch |err| self.setStatus("Could not auto-attach to {s}: {s}", .{ process.name, @errorName(err) });
+    }
 }
 
 pub fn isAttached(self: *const Self, pid: u32) bool {
@@ -181,6 +208,14 @@ pub fn lastAttached(self: *const Self) ?u32 {
 
 pub fn attach(self: *Self, pid: u32) !void {
     if (self.isAttached(pid)) return; // never inject the same process twice
+    // A manual attempt also counts, so a failed/manual-detached game is not
+    // immediately attached again by the periodic saved-game scan.
+    for (self.proc_list) |process| {
+        if (process.pid == pid) {
+            _ = try self.auto_attach.claim(pid, process.started_at);
+            break;
+        }
+    }
     try self.attached.append(alloc, pid);
     if (!client.attach(pid)) {
         self.forgetPid(pid);
@@ -455,7 +490,37 @@ fn pushCandidate(self: *Self, pid: u32, code: []const u8, text: []const u8, thre
     errdefer alloc.free(c);
     const t = try alloc.dupe(u8, text);
     errdefer alloc.free(t);
-    try self.candidates.append(alloc, .{ .pid = pid, .code = c, .text = t, .thread_handle = thread_handle });
+    var index: usize = 0;
+    while (index < self.candidates.items.len and
+        std.mem.order(u8, self.candidates.items[index].code, code) != .gt) : (index += 1)
+    {}
+    try self.candidates.insert(alloc, index, .{ .pid = pid, .code = c, .text = t, .thread_handle = thread_handle });
+    if (self.selected_candidate) |selected| {
+        if (selected >= index) self.selected_candidate = selected + 1;
+    }
+}
+
+test "hook history preview search candidates sort by code and preserve selection" {
+    var self: Self = undefined;
+    self.candidates = .empty;
+    self.selected_candidate = null;
+    defer {
+        self.clearCandidates();
+        self.candidates.deinit(alloc);
+    }
+    try self.pushCandidate(1, "HS2@30", "second", null);
+    try self.pushCandidate(1, "HS1@20", "first", null);
+    self.selected_candidate = 1;
+    try self.pushCandidate(1, "HS1@10", "earlier", null);
+    try std.testing.expectEqualStrings("HS1@10", self.candidates.items[0].code);
+    try std.testing.expectEqualStrings("HS1@20", self.candidates.items[1].code);
+    try std.testing.expectEqualStrings("HS2@30", self.candidates.items[2].code);
+    try std.testing.expectEqual(@as(?usize, 2), self.selected_candidate);
+    try self.pushCandidate(1, "HS1@20", "updated", 42);
+    try std.testing.expectEqual(@as(usize, 3), self.candidates.items.len);
+    try std.testing.expectEqualStrings("updated", self.candidates.items[1].text);
+    try std.testing.expectEqual(@as(?u64, 42), self.candidates.items[1].thread_handle);
+    try std.testing.expectEqual(@as(?usize, 2), self.selected_candidate);
 }
 
 pub fn startSearch(self: *Self, now_ms: i64) void {
@@ -530,9 +595,9 @@ fn handleEvent(self: *Self, ev: tx.Event, now_ms: i64) !void {
                 self.auto_switched = true;
             }
             if (self.selected) |sel| {
-                if ((th.accepted or builtin) and !th.removed and sel.pid == th.pid and sel.handle == th.handle) {
+                if (!self.reader.capture_paused and (th.accepted or builtin) and !th.removed and sel.pid == th.pid and sel.handle == th.handle) {
                     if (th.reduce_pairs) {
-                        const processed = try @import("hook_sample_filter.zig").reducePairs(alloc, t.text);
+                        const processed = try @import("components/textractor/hook_sample_filter.zig").reducePairs(alloc, t.text);
                         defer alloc.free(processed);
                         try self.reader.append(processed);
                     } else try self.reader.append(t.text);
@@ -557,24 +622,28 @@ fn drainEvents(self: *Self, now_ms: i64) !bool {
 
 // ---- background pump (Knots `dispatch`) ----
 
-/// Runs on a worker thread: wakes for text or polls Shift selection every 50 ms.
+/// Hook events wake immediately. The timeout only refreshes timers/background jobs.
 /// Touches no app state.
 fn waitForEvents() anyerror!void {
-    client.wait(50);
+    client.wait(1000);
 }
 
-/// Runs on the main thread inside a frame: absorb events, request a redraw, re-arm the wait.
+/// Runs inside Knots' completion frame: absorb events and re-arm the wait.
 fn pump(view: *knots.View, frame_ctx: *ui.Frame, result: anyerror!void) !void {
     const self: *Self = @alignCast(@fieldParentPtr("app", view.app));
     result catch {};
-    self.reader.tick(frame_ctx);
+    const now = frame_ctx.ui().input.now_ms;
+    if (self.store.entries.items.len > 0 and (self.last_process_scan_ms == null or now - self.last_process_scan_ms.? >= 2000)) {
+        self.last_process_scan_ms = now;
+        self.refreshProcs();
+    }
     if (self.search_running and frame_ctx.ui().input.now_ms - self.search_started_ms.? >= 30000) {
         client.stopSearch(self.search_pid.?);
         self.search_running = false;
         self.setStatus("Search done (30 seconds). Select a candidate to inspect it.", .{});
     }
     _ = try self.drainEvents(frame_ctx.ui().input.now_ms);
-    frame_ctx.requestRedraw();
+    // Dispatch completions already run inside a frame; no extra redraw is needed.
     try view.app.dispatch(view.id, waitForEvents, .{}, pump);
 }
 
@@ -582,6 +651,15 @@ fn pump(view: *knots.View, frame_ctx: *ui.Frame, result: anyerror!void) !void {
 
 pub fn frame(view: *knots.View, context: *ui.Frame) !void {
     const self: *Self = @alignCast(@fieldParentPtr("app", view.app));
+    for (context.ui().input.key_events) |event| {
+        if (event.action != .press) continue;
+        if (event.key == .f11 or (event.key == .escape and self.app.main_viewport.window.getDisplayMode() == .fullscreen)) {
+            self.toggleFullscreen();
+            context.requestRedraw();
+        }
+    }
+    self.window_integration.guardFrames();
+    self.reader.tick(context);
     self.reader.updateControlsVisibility(context, !self.texthooking_collapsed);
     self.background.appearance.applyTheme(context);
     try self.anki.tick(context);
@@ -618,7 +696,8 @@ pub fn frame(view: *knots.View, context: *ui.Frame) !void {
             ReaderView{ .self = self },
         },
     });
-    try @import("text_context_menu.zig").render(context, &self.app.main_viewport.window);
+    try @import("ui/text_context_menu.zig").render(context, &self.app.main_viewport.window);
+    if (self.reader.scroll_pending > 0) context.requestRedraw();
 }
 
 pub fn main(init_: std.process.Init) !void {
@@ -626,6 +705,8 @@ pub fn main(init_: std.process.Init) !void {
     defer self.deinit();
     client = .init(alloc);
     client.start();
+    try self.window_integration.attach(&self.app.main_viewport.window);
+    defer self.window_integration.detach();
     // Textractor's Host::Start installs a WH_GETMESSAGE hook on this thread.
     // Register our window so Windows actually posts the WM_CLIPBOARDUPDATE
     // messages that wake its clipboard reader.
@@ -643,8 +724,23 @@ pub fn main(init_: std.process.Init) !void {
     try self.app.start(frame);
 }
 
+test "hook history preview evicts oldest reader lines at the word budget" {
+    var reader: Reader = .{ .dictionaries = .{} };
+    defer reader.deinit();
+    const text = try std.testing.allocator.alloc(u8, 500_000 * 2);
+    defer std.testing.allocator.free(text);
+    for (0..500_000) |i| @memcpy(text[i * 2 ..][0..2], "a ");
+    try reader.append(text);
+    try std.testing.expectEqual(@as(usize, 1), reader.lines.items.len);
+    try reader.append("newest word");
+    try std.testing.expectEqual(@as(usize, 1), reader.lines.items.len);
+    try std.testing.expectEqualStrings("newest word", reader.lines.items[0].text);
+    try std.testing.expectEqual(@as(usize, 4), reader.history_units);
+    try std.testing.expectEqual(@as(usize, 11), reader.history_bytes);
+}
+
 test "hook history preview multiline drag selects context in horizontal and both vertical directions" {
-    for ([_]@import("reading_layout.zig").Direction{ .horizontal, .vertical_left, .vertical_right, .horizontal }, 0..) |direction, mode| {
+    for ([_]@import("components/reader/reading_layout.zig").Direction{ .horizontal, .vertical_left, .vertical_right, .horizontal }, 0..) |direction, mode| {
         var ui_context = try ui.Context.init(std.testing.allocator, .{ .ui = .{ .fonts = &.{.{ .name = "default", .data = @embedFile("fonts/jp.ttf") }} } });
         defer ui_context.deinit();
         var reader: Reader = .{ .dictionaries = .{} };
@@ -698,7 +794,7 @@ test "hook history preview multiline drag selects context in horizontal and both
 }
 
 test "hook history preview theme change sets contrasting text and preserves later overrides" {
-    var appearance: @import("appearance_settings.zig") = .{};
+    var appearance: @import("components/appearance/appearance_settings.zig") = .{};
     appearance.buttons.mode = .outline;
     try std.testing.expect(appearance.setTheme(.dark));
     const dark_text = appearance.buttons.foreground;
@@ -723,7 +819,7 @@ test "hook history preview theme change sets contrasting text and preserves late
 }
 
 test "hook history preview pronunciation loading status renders beside Play" {
-    var audio: @import("pronunciation.zig") = .{
+    var audio: @import("components/pronunciation/pronunciation.zig") = .{
         .status_key = std.hash.Wyhash.hash(std.hash.Wyhash.hash(0, "猫"), "ねこ"),
         .status = "Loading pronunciation...",
     };
@@ -744,14 +840,14 @@ test "hook history preview pronunciation loading status renders beside Play" {
     try std.testing.expect(status_found);
 }
 
-test "hook history preview pronunciation never starts without internet opt-in" {
-    var audio: @import("pronunciation.zig") = .{};
+test "hook history preview pronunciation respects disabled internet despite enabled defaults" {
+    var audio: @import("components/pronunciation/pronunciation.zig") = .{};
     defer audio.deinit();
     try audio.play("猫", "ねこ", false);
     try std.testing.expect(audio.job == null);
     try std.testing.expect(audio.thread == null);
-    const appearance: @import("appearance_settings.zig") = .{};
-    try std.testing.expect(!appearance.online_audio_enabled);
+    const appearance: @import("components/appearance/appearance_settings.zig") = .{};
+    try std.testing.expect(appearance.online_audio_enabled);
 }
 
 test "hook history preview Ctrl C copies selected reader text" {
@@ -767,15 +863,45 @@ test "hook history preview Ctrl C copies selected reader text" {
     var frame_ctx = try ui_context.beginFrame(.{ .input = .{ .pos = .{ 0, 0 }, .key_events = &.{.{ .key = .c, .action = .press, .mods = .{ .ctrl = true } }} }, .now_ms = 0, .delta_ns = 16_000_000, .logical_extent = .{ .width = 500, .height = 500 }, .physical_extent = .{ .width = 500, .height = 500 }, .content_scale = 1 });
     defer frame_ctx.deinit();
     frame_ctx.ui().state.selection_text = "reader selection";
-    try @import("text_context_menu.zig").render(&frame_ctx, &window);
+    try @import("ui/text_context_menu.zig").render(&frame_ctx, &window);
     const output = try ui_context.endFrame(&frame_ctx);
     try std.testing.expectEqualStrings("reader selection", output.clipboard_write.?);
+}
+
+test "hook history preview scrollbar drags never turn into text selections" {
+    var ui_context = try ui.Context.init(std.testing.allocator, .{ .ui = .{ .fonts = &.{.{ .name = "default", .data = @embedFile("fonts/jp.ttf") }} } });
+    defer ui_context.deinit();
+    const Selection = @import("components/reader/shift_selection.zig");
+    for ([_]bool{ false, true }) |horizontal| {
+        var selection: Selection = .{ .horizontal_scrollbar = horizontal, .active_id = 123, .anchor_id = 123 };
+        for (0..4) |phase| {
+            const pointer: [2]f32 = if (phase == 0) (if (horizontal) .{ 150, 299 } else .{ 399, 150 }) else .{ 150, 150 };
+            selection.pointer = pointer;
+            var frame_ctx = try ui_context.beginFrame(.{ .input = .{ .pos = .{ pointer[0], pointer[1] }, .mouse = .{ .{ .down = phase != 2, .pressed = phase == 0 or phase == 3, .released = phase == 2 }, .{}, .{}, .{}, .{} } }, .now_ms = @intCast(phase * 16), .delta_ns = 16_000_000, .logical_extent = .{ .width = 400, .height = 300 }, .physical_extent = .{ .width = 400, .height = 300 }, .content_scale = 1 });
+            defer frame_ctx.deinit();
+            const log = try ui_context.ui.state.getOrCreate(.measured, ui_context.ui.allocator, ui.Key.str("reader.log").hash());
+            log.* = .{ .width = 400, .height = 300, .box = @TypeOf(log.box).init(0, 0, 400, 300) };
+            selection.beginPointer(&frame_ctx);
+            if (phase <= 1) {
+                try std.testing.expect(selection.scrollbar_dragging);
+                try std.testing.expect(!selection.mouse_dragging);
+                try std.testing.expectEqual(@as(?u64, 123), selection.active_id);
+            } else if (phase == 2) {
+                try std.testing.expect(!selection.scrollbar_dragging);
+                try std.testing.expect(!selection.mouse_dragging);
+            } else {
+                try std.testing.expect(!selection.scrollbar_dragging);
+                try std.testing.expect(selection.mouse_dragging);
+            }
+            _ = try ui_context.endFrame(&frame_ctx);
+        }
+    }
 }
 
 test "hook history preview reader text supports ordinary mouse drag selection" {
     var ui_context = try ui.Context.init(std.testing.allocator, .{ .ui = .{ .fonts = &.{.{ .name = "default", .data = @embedFile("fonts/jp.ttf") }} } });
     defer ui_context.deinit();
-    var selection: @import("shift_selection.zig") = .{};
+    var selection: @import("components/reader/shift_selection.zig") = .{};
     var selected_bytes: usize = 0;
     for (0..4) |iteration| {
         var frame_ctx = try ui_context.beginFrame(.{
@@ -837,6 +963,16 @@ test "hook history preview groups streams and applies processing only to the sel
     try self.handleEvent(.{ .text = .{ .meta = other, .text = @constCast("book") } }, 0);
     try std.testing.expectEqualStrings("book", self.reader.lines.items[1].text);
 
+    self.reader.capture_paused = true;
+    const preview_count = self.threads.items[2].lines.items.len;
+    try self.handleEvent(.{ .text = .{ .meta = other, .text = @constCast("paused material") } }, 0);
+    try std.testing.expectEqual(@as(usize, 2), self.reader.lines.items.len);
+    try std.testing.expectEqual(preview_count + 1, self.threads.items[2].lines.items.len);
+    self.reader.capture_paused = false;
+    try self.handleEvent(.{ .text = .{ .meta = other, .text = @constCast("resumed material") } }, 0);
+    try std.testing.expectEqual(@as(usize, 3), self.reader.lines.items.len);
+    try std.testing.expectEqualStrings("resumed material", self.reader.lines.items[2].text);
+
     var ui_context = try ui.Context.init(std.testing.allocator, .{ .ui = .{ .fonts = &.{.{ .name = "default", .data = @embedFile("fonts/jp.ttf") }} } });
     defer ui_context.deinit();
     var frame_ctx = try ui_context.beginFrame(.{ .input = .{ .pos = .{ 0, 0 } }, .now_ms = 0, .delta_ns = 16_000_000, .logical_extent = .{ .width = 600, .height = 500 }, .physical_extent = .{ .width = 600, .height = 500 }, .content_scale = 1 });
@@ -850,7 +986,7 @@ test "hook history preview groups streams and applies processing only to the sel
     try std.testing.expectEqual(@as(usize, 2), removal_buttons);
 }
 
-test "hook history preview flooded history stays below accessibility node limit" {
+test "hook history preview minimum fonts at 4K keep paragraph accessibility below the node limit" {
     var ui_context = try ui.Context.init(std.testing.allocator, .{
         .ui = .{ .fonts = &.{.{ .name = "default", .data = @embedFile("fonts/jp.ttf") }} },
     });
@@ -864,21 +1000,118 @@ test "hook history preview flooded history stays below accessibility node limit"
     var fonts: FontSettings = .{};
     var background: BackgroundImage = .{};
     var anki: AnkiSettings = .{ .gpa = std.testing.allocator };
-    for ([_]@import("reading_layout.zig").Direction{ .horizontal, .vertical_left, .vertical_right, .horizontal }, 0..) |direction, iteration| {
+    for ([_]@import("components/reader/reading_layout.zig").Direction{ .horizontal, .vertical_left, .vertical_right, .horizontal }, 0..) |direction, iteration| {
         background.appearance.direction = direction;
+        fonts.reader_size = if (iteration == 0) 28 else 12;
         fonts.character_spacing = if (iteration == 3) 1 else 0;
-        var frame_ctx = try ui_context.beginFrame(.{ .input = .{ .pos = .{ 0, 0 } }, .now_ms = @intCast(iteration * 16), .delta_ns = 16_000_000, .logical_extent = .{ .width = 1100, .height = 760 }, .physical_extent = .{ .width = 1100, .height = 760 }, .content_scale = 1 });
+        var frame_ctx = try ui_context.beginFrame(.{ .input = .{ .pos = .{ 0, 0 } }, .now_ms = @intCast(iteration * 16), .delta_ns = 16_000_000, .logical_extent = .{ .width = 3840, .height = 2160 }, .physical_extent = .{ .width = 3840, .height = 2160 }, .content_scale = 1 });
         defer frame_ctx.deinit();
-        const root: Rect = .{ .key = .str("test.flood.root"), .style = &.{ .width = .fixed(1100), .height = .fixed(760) } };
+        const root: Rect = .{ .key = .str("test.flood.root"), .style = &.{ .width = .fixed(3840), .height = .fixed(2160) } };
         _ = try root.open(&frame_ctx);
         try reader.render(&frame_ctx, &fonts, &background, &anki);
         try root.close(&frame_ctx);
         const output = try ui_context.endFrame(&frame_ctx);
+        // The viewport contains many thousands of glyphs at the minimum font.
+        // Semantics must scale with paragraphs, not with those glyphs.
         try std.testing.expect(output.accessibility.nodes.len < 2048);
-        // Paging and shortened display must not destroy the saved source text.
+        // Virtualization must preserve the complete source text.
         try std.testing.expectEqual(@as(usize, 100), reader.lines.items.len);
         try std.testing.expectEqual(@as(usize, 20000), reader.lines.items[99].text.len);
-        reader.page_end = 50;
+    }
+}
+
+test "hook history preview reader scrolls its full document in every reading direction" {
+    for ([_]@import("components/reader/reading_layout.zig").Direction{ .horizontal, .vertical_left, .vertical_right, .horizontal }, 0..) |direction, mode| {
+        var ui_context = try ui.Context.init(std.testing.allocator, .{ .ui = .{ .fonts = &.{.{ .name = "default", .data = @embedFile("fonts/jp.ttf") }} } });
+        defer ui_context.deinit();
+        var reader: Reader = .{ .dictionaries = .{}, .direction = direction };
+        defer reader.deinit();
+        var long: std.ArrayList(u8) = .empty;
+        defer long.deinit(alloc);
+        for (0..200) |_| try long.appendSlice(alloc, "日本語の文章");
+        try reader.append(long.items);
+        for (0..200) |_| try reader.append("日本語の文章を読みながら辞書で調べます。画面を埋める文章の続きです。");
+        reader.scroll_pending = 0;
+        var fonts: FontSettings = .{};
+        if (mode == 3) fonts.character_spacing = 1;
+        var background: BackgroundImage = .{};
+        background.appearance.direction = direction;
+        var anki: AnkiSettings = .{ .gpa = std.testing.allocator };
+        const axis: usize = if (direction == .horizontal) 1 else 0;
+        var wheel_start: f32 = 0;
+        var saved_anchor: ?@import("components/reader/reader_document.zig").Anchor = null;
+        for (0..10) |phase| {
+            if ((phase >= 3 and phase <= 7) or phase == 9) {
+                const viewport = ui_context.ui.state.get(.measured, ui.Key.str("reader.log").hash()).?.*;
+                const content = ui_context.ui.state.get(.measured, ui.Key.str("reader.content").hash()).?.*;
+                const maximum = if (axis == 1) content.height + 32 - viewport.height else content.width + 32 - viewport.width;
+                const target = switch (phase) {
+                    3, 7, 9 => maximum / 2,
+                    4, 5 => maximum,
+                    else => 0,
+                };
+                const scroll = ui_context.ui.state.get(.scroll, ui.Key.str("reader.log").hash()).?;
+                if (axis == 1) scroll.offset[1] = target else scroll.offset[0] = target;
+                if (phase == 7) wheel_start = target;
+                if (phase == 9) {
+                    saved_anchor = reader.document.anchor(target, direction == .vertical_right);
+                    reader.scroll_pending = 0;
+                    reader.near_bottom = false;
+                    try reader.append("新しい文章が届いても読んでいる位置を保ちます。");
+                    try std.testing.expectEqual(@as(u8, 0), reader.scroll_pending);
+                }
+            }
+            var pointer: [2]f32 = .{ 0, 0 };
+            if (phase == 7) {
+                const viewport = ui_context.ui.state.get(.measured, ui.Key.str("reader.log").hash()).?.*;
+                pointer = .{ viewport.box.x() + viewport.width / 2, viewport.box.y() + viewport.height / 2 };
+            }
+            reader.shift_selection.pointer = pointer;
+            var frame_ctx = try ui_context.beginFrame(.{ .input = .{ .pos = .{ pointer[0], pointer[1] }, .scroll = .{ .pixel = .{ 0, if (phase == 7) @as(f32, 100) else 0 } } }, .now_ms = @intCast(phase * 16), .delta_ns = 16_000_000, .logical_extent = .{ .width = 1400, .height = 900 }, .physical_extent = .{ .width = 1400, .height = 900 }, .content_scale = 1 });
+            defer frame_ctx.deinit();
+            if (phase == 8) {
+                reader.scroll_pending = 2;
+                reader.tick(&frame_ctx);
+            }
+            const root: Rect = .{ .key = .str("test.document.root"), .style = &.{ .width = .fixed(1400), .height = .fixed(900), .direction = .row } };
+            _ = try root.open(&frame_ctx);
+            try reader.render(&frame_ctx, &fonts, &background, &anki);
+            try root.close(&frame_ctx);
+            _ = try ui_context.endFrame(&frame_ctx);
+            try std.testing.expectEqual(@as(usize, if (phase == 9) 202 else 201), reader.document.entries.items.len);
+            try std.testing.expectEqualStrings(long.items, reader.document.entries.items[0].text);
+            if (phase < 2) continue;
+            const viewport = ui_context.ui.state.get(.measured, ui.Key.str("reader.log").hash()).?.*;
+            const content = ui_context.ui.state.get(.measured, ui.Key.str("reader.content").hash()).?.*;
+            try std.testing.expect(viewport.width > 1200);
+            try std.testing.expect(viewport.height > 700);
+            try std.testing.expect(if (axis == 1) content.height > viewport.height * 5 else content.width > viewport.width * 5);
+            if (phase == 4) {
+                const offset = ui_context.ui.state.getScroll(ui.Key.str("reader.log").hash());
+                try std.testing.expect(offset[axis] > 0);
+                const end_id = if (direction == .vertical_right) reader.lines.items[0].id else reader.lines.items[200].id;
+                try std.testing.expect(ui_context.ui.layout_ctx.slotForId(ui.Key.str("reader.placement").indexed(end_id).hash()) != null);
+            }
+            if (phase == 6) {
+                const start_id = if (direction == .vertical_right) reader.lines.items[200].id else reader.lines.items[0].id;
+                try std.testing.expect(ui_context.ui.layout_ctx.slotForId(ui.Key.str("reader.placement").indexed(start_id).hash()) != null);
+            }
+            if (phase == 7) {
+                const offset = ui_context.ui.state.getScroll(ui.Key.str("reader.log").hash());
+                try std.testing.expect(if (direction == .vertical_right) offset[axis] < wheel_start else offset[axis] > wheel_start);
+            }
+            if (phase == 8) {
+                const offset = ui_context.ui.state.getScroll(ui.Key.str("reader.log").hash());
+                try std.testing.expect(if (direction == .vertical_right) offset[axis] == 0 else offset[axis] > wheel_start);
+                try std.testing.expect(ui_context.ui.layout_ctx.slotForId(ui.Key.str("reader.placement").indexed(reader.lines.items[200].id).hash()) != null);
+            }
+            if (phase == 9) {
+                const saved = saved_anchor.?;
+                const offset = ui_context.ui.state.getScroll(ui.Key.str("reader.log").hash());
+                const i = reader.document.indices.get(saved.id).?;
+                try std.testing.expectApproxEqAbs(saved.screen, reader.document.position(i, direction == .vertical_right) - offset[axis], 0.1);
+            }
+        }
     }
 }
 
@@ -917,7 +1150,7 @@ test "hook history preview and reader survive layout state growth" {
     var fonts: FontSettings = .{};
     var background: BackgroundImage = .{};
     var anki: AnkiSettings = .{ .gpa = std.testing.allocator };
-    const directions = [_]@import("reading_layout.zig").Direction{ .horizontal, .vertical_left, .vertical_right, .horizontal };
+    const directions = [_]@import("components/reader/reading_layout.zig").Direction{ .horizontal, .vertical_left, .vertical_right, .horizontal };
     for (directions, 0..) |direction, iteration| {
         // New entries force the measured-state hash map to grow during rendering.
         for (0..64) |_| try reader.append("日本語のテキスト");
@@ -1061,4 +1294,29 @@ test "hook history preview built-in sources remain separate and feed only the se
         if (isBuiltin(node.name)) sources += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), sources);
+}
+
+test "hook history preview asset drop zones accept multiple paths only inside their own surface" {
+    var context = try ui.Context.init(std.testing.allocator, .{ .ui = .{ .fonts = &.{.{ .name = "default", .data = @embedFile("fonts/jp.ttf") }} } });
+    defer context.deinit();
+    const paths = [_][]const u8{ "one.zip", "two.zip" };
+    const dict_key: ui.Key = .str("test.drop.dictionaries");
+    var pointer: [2]f32 = .{ -1, -1 };
+    for (0..2) |iteration| {
+        var frame_ctx = try context.beginFrame(.{ .input = .{ .pos = .{ pointer[0], pointer[1] } }, .now_ms = @intCast(iteration * 16), .delta_ns = 16_000_000, .logical_extent = .{ .width = 440, .height = 400 }, .physical_extent = .{ .width = 440, .height = 400 }, .content_scale = 1, .dropped_paths = if (iteration == 1) &paths else &.{} });
+        defer frame_ctx.deinit();
+        const root: Rect = .{ .key = .str("test.drop.root"), .style = &.{ .width = .fixed(440), .height = .fixed(400), .direction = .column } };
+        _ = try root.open(&frame_ctx);
+        const dict_paths = try @import("ui/drops.zig").renderPaths(&frame_ctx, pointer, dict_key, "Dictionaries");
+        const font_paths = try @import("ui/drops.zig").renderPaths(&frame_ctx, pointer, .str("test.drop.fonts"), "Fonts");
+        try root.close(&frame_ctx);
+        try std.testing.expectEqual(@as(usize, 0), font_paths.len);
+        if (iteration == 1) {
+            try std.testing.expectEqual(@as(usize, 2), dict_paths.len);
+            try std.testing.expectEqualStrings("two.zip", dict_paths[1]);
+        }
+        _ = try context.endFrame(&frame_ctx);
+        const measured = context.ui.state.get(.measured, dict_key.hash()).?;
+        pointer = .{ measured.box.x() + 10, measured.box.y() + 10 };
+    }
 }
