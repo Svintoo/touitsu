@@ -219,6 +219,12 @@ pub fn build(b: *std.Build) void {
     });
     b.step("test-hook-preview", "Render hook history and growing reader state in all reading directions").dependOn(&b.addRunArtifact(hook_preview_test).step);
 
+    const tests = b.addTest(.{
+        .name = "touitsu_tests",
+        .root_module = exe.root_module,
+    });
+    b.step("test", "Run all unit and UI interaction tests").dependOn(&b.addRunArtifact(tests).step);
+
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(b.path("src/fonts/jp.ttf"), .bin, "fonts/jp.ttf").step);
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(b.path("docs/dicts-folder.txt"), .bin, "dicts/README.txt").step);
 

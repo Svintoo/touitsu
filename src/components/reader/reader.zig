@@ -240,10 +240,13 @@ pub fn render(self: *Self, context: *ui.Frame, fonts: *FontSettings, background:
         if ((try context.interact(Button{ .key = .src(@src()), .label = if (self.paused) "Resume timer" else "Pause timer" })).clicked) self.paused = !self.paused;
         if ((try context.interact(Button{ .key = .src(@src()), .label = if (self.capture_paused) "Resume capture" else "Pause capture" })).clicked) self.capture_paused = !self.capture_paused;
         // CHANGE HERE: set .icon to .{ .pixels = .{ .data = @embedFile("../../icons/your-icon.rgba"), .width = 48, .height = 48 } }.
-        const action_style = controls.action(context);
-        if ((try context.interact(Button{ .key = .src(@src()), .label = "Delete last", .icon = null, .disabled = self.lines.items.len == 0, .appearance = .explicit, .style = &action_style })).clicked) try self.remove(self.lines.items.len - 1);
+        if ((try context.interact(Button{ .key = .str("reader.delete_last"), .label = "Delete last", .icon = null, .disabled = self.lines.items.len == 0 })).clicked) {
+            try self.remove(self.lines.items.len - 1);
+            self.scroll_pending = 2;
+            self.near_bottom = true;
+        }
         // CHANGE HERE: set .icon to .{ .pixels = .{ .data = @embedFile("../../icons/your-icon.rgba"), .width = 48, .height = 48 } }.
-        if ((try context.interact(Button{ .key = .src(@src()), .label = "Undo", .icon = null, .disabled = self.undo.items.len == 0, .appearance = .explicit, .style = &action_style })).clicked) {
+        if ((try context.interact(Button{ .key = .str("reader.undo"), .label = "Undo", .icon = null, .disabled = self.undo.items.len == 0 })).clicked) {
             const item = self.undo.items[self.undo.items.len - 1];
             try self.lines.insert(a, @min(item.index, self.lines.items.len), item.line);
             _ = self.undo.pop();
@@ -505,4 +508,8 @@ fn counterLabel(self: *Self, context: *ui.Frame) ![]const u8 {
     const timer = if (self.options.show_timer) try std.fmt.allocPrint(context.arena(), "{d:0>2}:{d:0>2}:{d:0>2} {d}/hr", .{ seconds / 3600, seconds / 60 % 60, seconds % 60, rate }) else "";
     const label = try std.fmt.allocPrint(context.arena(), "{s}  {s}", .{ counts, timer });
     return label;
+}
+
+test {
+    _ = @import("../../tests/components/reader/reader.zig");
 }

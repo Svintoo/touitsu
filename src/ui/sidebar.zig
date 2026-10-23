@@ -16,7 +16,8 @@ pub fn Components(comptime App: type) type {
                 const self = sidebar.self;
                 // Reserve a scrollbar gutter without narrowing the sidebar controls.
                 const scrollbar_gutter = context.ui().theme.scrollbar_thickness + 8;
-                const toggle_width: f32 = if (self.reader.controls_hidden) 0 else 22;
+                // Autohide changes only the handle's visibility, never the reader's width.
+                const toggle_width: f32 = 22;
                 const available: f32 = @floatFromInt(context.input().logical_extent.width);
                 const content_width = if (self.sidebar_tab == .textractor) @max(0, available * 0.75 - toggle_width - scrollbar_gutter) else @min(516, @max(0, available * 0.75 - toggle_width - scrollbar_gutter));
                 const width = context.ui().anim(ui.Key.str("texthooking.sidebar").hash(), "width", if (self.texthooking_collapsed) toggle_width else content_width + scrollbar_gutter + toggle_width, .{ .duration_ms = 220 });
@@ -67,11 +68,18 @@ pub fn Components(comptime App: type) type {
         const SidebarCollapse = struct {
             self: *Self,
             pub fn render(control: *const SidebarCollapse, context: *ui.Frame) anyerror!void {
-                if (control.self.reader.controls_hidden) return;
-                const button: Button = .{ .key = .src(@src()), .appearance = .explicit, .style = &.{
+                const hidden = control.self.reader.controls_hidden;
+                const slide = context.ui().anim(ui.Key.str("sidebar.collapse").hash(), "slide", if (hidden) -22 else 0, .{ .duration_ms = 220 });
+                if (hidden and slide <= -22) return;
+                const slot: Rect = .{ .key = .str("sidebar.collapse.slot"), .style = &.{ .width = .fixed(22), .height = .grow(), .overflow = .hidden } };
+                _ = try slot.open(context);
+                defer slot.close(context) catch {};
+                const button: Button = .{ .key = .str("sidebar.collapse.button"), .appearance = .explicit, .disabled = hidden, .style = &.{
                     .width = .fixed(22),
                     .height = .grow(),
                     .padding = .all(0),
+                    .position = .absolute,
+                    .offset = .{ slide, 0 },
                     .justify = .center,
                     .@"align" = .center,
                     .radius = .none,
@@ -81,6 +89,7 @@ pub fn Components(comptime App: type) type {
                     .border_color = .toned,
                     .hover = &.{ .background = .muted, .foreground = .text },
                 } };
+                // The absolute offset slides the handle inside its reserved, clipped slot.
                 const response = try button.openResponse(context);
                 try context.e(ui.component.Image{
                     .key = .str("sidebar.collapse.icon"),
@@ -88,7 +97,7 @@ pub fn Components(comptime App: type) type {
                     .style = &.{ .width = .fixed(16), .height = .fixed(16), .foreground = .text },
                 });
                 try button.close(context);
-                try context.ui().setAccessibility(response.id, .{ .role = .button, .name = if (control.self.texthooking_collapsed) "Open sidebar" else "Collapse sidebar" });
+                try context.ui().setAccessibility(response.id, .{ .role = .button, .name = if (control.self.texthooking_collapsed) "Open sidebar" else "Collapse sidebar", .state = .{ .disabled = hidden } });
                 if (response.clicked) {
                     control.self.texthooking_collapsed = !control.self.texthooking_collapsed;
                     context.requestRedraw();

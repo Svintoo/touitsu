@@ -79,19 +79,6 @@ pub fn writeAll(path: [*:0]const u16, data: []const u8) !void {
     if (MoveFileExW(temp, path, 1 | 8) == 0) return error.CantReplaceHistory;
 }
 
-test "history replacement preserves UTF-8 and replaces the previous snapshot" {
-    const testing = std.testing;
-    const path = std.unicode.utf8ToUtf16LeStringLiteral("zig-out/reader-store-test.json");
-    const Delete = struct {
-        extern "kernel32" fn DeleteFileW(name: [*:0]const u16) callconv(.winapi) i32;
-    };
-    defer _ = Delete.DeleteFileW(path);
-    try writeAll(path, "{\"lines\":[\"日本語\"],\"elapsed_ms\":1200}");
-    const first = (try readAll(testing.allocator, path)).?;
-    defer testing.allocator.free(first);
-    try testing.expectEqualStrings("{\"lines\":[\"日本語\"],\"elapsed_ms\":1200}", first);
-    try writeAll(path, "{\"lines\":[],\"elapsed_ms\":0}");
-    const second = (try readAll(testing.allocator, path)).?;
-    defer testing.allocator.free(second);
-    try testing.expectEqualStrings("{\"lines\":[],\"elapsed_ms\":0}", second);
+test {
+    _ = @import("../../tests/components/reader/reader_store.zig");
 }

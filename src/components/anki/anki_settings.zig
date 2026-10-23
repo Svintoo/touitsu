@@ -532,102 +532,22 @@ pub fn renderCardStatus(self: *Self, frame: *ui.Frame, status_key: ui.Key, entry
     }
 }
 
-test "dropdown labels survive releasing their configuration owner during a frame" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var choices: Strings = .{};
-    const parsed = try std.json.parseFromSlice(std.json.Value, a, "[\"Basic\",\"日本語\"]", .{});
-    defer parsed.deinit();
-    try choices.read(parsed.value);
-    const labels = try choices.snapshot(arena.allocator());
-    choices.deinit();
-    try std.testing.expectEqualStrings("Basic", labels[0]);
-    try std.testing.expectEqualStrings("日本語", labels[1]);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(labels[1]));
-}
-
-test "field validation requires templates and a valid selected note type" {
-    var self: Self = .{ .gpa = std.testing.allocator };
-    defer self.deinit();
-    try self.apply(.{});
-    const parsed = try std.json.parseFromSlice(std.json.Value, a, "[\"Default\",\"Basic\",\"Front\",\"Back\"]", .{});
-    defer parsed.deinit();
-    try self.decks.read(parsed.value);
-    try self.models.read(parsed.value);
-    try self.fields.read(parsed.value);
-    try self.ensureFormatting();
-    try std.testing.expect(self.valid());
-    try self.set(&self.format_fields.items[0].template, "{unknown}");
-    try std.testing.expect(!self.valid());
-    try self.set(&self.format_fields.items[0].template, "{expression}");
-    try self.set(&self.deck, "Missing");
-    try std.testing.expect(!self.valid());
-}
-test "added note identity follows Anki collection and selected word" {
-    var self: Self = .{ .gpa = std.testing.allocator };
-    defer self.deinit();
-    try self.apply(.{});
-    const first = try self.entryKey("日本", "にほん", 1, 1, "Japan");
-    defer a.free(first);
-    const same = try self.entryKey("日本", "にほん", 1, 1, "Japan");
-    defer a.free(same);
-    try std.testing.expectEqualStrings(first, same);
-    try self.set(&self.endpoint, "http://127.0.0.1:9876");
-    const other = try self.entryKey("日本", "にほん", 1, 1, "Japan");
-    defer a.free(other);
-    try std.testing.expect(!std.mem.eql(u8, first, other));
-}
-
-test "entries with the same spelling have independent Anki identity" {
-    var self: Self = .{ .gpa = std.testing.allocator };
-    defer self.deinit();
-    try self.apply(.{});
-    const first = try self.entryKey("word", "reading", 1, 1, "first definition");
-    defer a.free(first);
-    const second = try self.entryKey("word", "reading", 1, 2, "second definition");
-    defer a.free(second);
-    const other_dictionary = try self.entryKey("word", "reading", 2, 1, "first definition");
-    defer a.free(other_dictionary);
-    try std.testing.expect(!std.mem.eql(u8, first, second));
-    try std.testing.expect(!std.mem.eql(u8, first, other_dictionary));
-}
-
-test "card formatting survives save and restores per-model templates without overwriting edits" {
-    var self: Self = .{ .gpa = std.testing.allocator };
-    defer self.deinit();
-    try self.apply(.{ .model = "Mining", .formatting = &.{
-        .{ .model = "Mining", .field = "Reading", .template = "<b>{reading}</b>" },
-        .{ .model = "Other", .field = "Front", .template = "{expression}" },
-        .{ .model = "Mining", .field = "Deleted field", .template = "old" },
-    } });
-    const fields = try std.json.parseFromSlice(std.json.Value, a, "[\"Reading\",\"Glossary\",\"Audio\",\"Sentence\",\"Hint\"]", .{});
-    defer fields.deinit();
-    try self.fields.read(fields.value);
-    try self.ensureFormatting();
-    try std.testing.expectEqualStrings("<b>{reading}</b>", self.format_fields.items[0].template.items);
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const active = try self.activeMappings(arena.allocator());
-    try std.testing.expectEqual(@as(usize, 5), active.len);
-    const encoded = try std.json.Stringify.valueAlloc(a, try self.config(arena.allocator()), .{});
-    defer a.free(encoded);
-    const saved = try std.json.parseFromSlice(Saved, a, encoded, .{});
-    defer saved.deinit();
-    var restored: Self = .{ .gpa = std.testing.allocator };
-    defer restored.deinit();
-    try restored.apply(saved.value);
-    try std.testing.expectEqualStrings("<b>{reading}</b>", restored.format_fields.items[0].template.items);
-    try std.testing.expectEqualStrings("Other", restored.format_fields.items[1].model);
-}
-test "offline card audio markers are removed without leaving a broken sound link" {
-    var job: Job = .{ .kind = .add, .revision = 0, .endpoint = try a.dupe(u8, ""), .api_key = try a.dupe(u8, ""), .model = try a.dupe(u8, "") };
-    defer {
-        a.free(job.endpoint);
-        a.free(job.api_key);
-        a.free(job.model);
-        if (job.body) |body| a.free(body);
-    }
-    job.body = try std.fmt.allocPrint(a, "{{\"Audio\":\"{s}\"}}", .{audio_marker});
-    try job.attachAudio();
-    try std.testing.expectEqualStrings("{\"Audio\":\"\"}", job.body.?);
+test {
+    _ = @import("../../tests/components/anki/anki_settings.zig").Tests(.{
+        .Saved = Saved,
+        .Strings = Strings,
+        .audio_marker = audio_marker,
+        .Job = Job,
+        .apply = apply,
+        .ensureFormatting = ensureFormatting,
+        .valid = valid,
+        .set = set,
+        .entryKey = entryKey,
+        .activeMappings = activeMappings,
+        .config = config,
+        .readStrings = Strings.read,
+        .snapshotStrings = Strings.snapshot,
+        .deinitStrings = Strings.deinit,
+        .attachJobAudio = Job.attachAudio,
+    });
 }

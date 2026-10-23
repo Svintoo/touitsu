@@ -35,24 +35,6 @@ const ThreadInfo = extern struct {
     hook_code: [*:0]const u16,
 };
 
-test "hook history preview queue remains bounded under callback flood" {
-    var client = Client.init(std.testing.allocator);
-    defer {
-        for (client.queue.items) |*event| event.deinit(client.alloc);
-        client.queue.deinit(client.alloc);
-    }
-    for (0..2000) |_| {
-        const code = try client.alloc.dupe(u8, "HS0@1234");
-        const text = try client.alloc.dupe(u8, "noisy sample");
-        client.push(.{ .hook_found = .{ .pid = 1, .code = code, .text = text } });
-    }
-    try std.testing.expectEqual(@as(usize, 768), client.queue.items.len);
-    client.push(.{ .disconnected = 1 });
-    try std.testing.expectEqual(@as(usize, 769), client.queue.items.len);
-    for (0..2000) |_| client.push(.{ .connected = 1 });
-    try std.testing.expectEqual(@as(usize, 1024), client.queue.items.len);
-}
-
 const ProcessCb = *const fn (?*anyopaque, u32) callconv(.c) void;
 const ThreadCb = *const fn (?*anyopaque, *const ThreadInfo) callconv(.c) void;
 const OutputCb = *const fn (?*anyopaque, *const ThreadInfo, [*]const u16, usize) callconv(.c) void;
@@ -337,30 +319,9 @@ pub const Client = struct {
     }
 };
 
-test "hook history preview clipboard notifications are deduplicated without dropping deliberate repeated copies" {
-    var client = Client.init(std.testing.allocator);
-    defer {
-        for (client.queue.items) |*event| event.deinit(client.alloc);
-        client.queue.deinit(client.alloc);
-    }
-    const Source = struct {
-        fn event(name: []const u8, text: []const u8) !Event {
-            return .{ .text = .{ .meta = .{ .pid = 0, .handle = 2, .addr = 0, .ctx = 0, .ctx2 = 0, .name = try std.testing.allocator.dupe(u8, name), .hook_code = try std.testing.allocator.dupe(u8, "") }, .text = try std.testing.allocator.dupe(u8, text) } };
-        }
-    };
-    client.pushSequenced(try Source.event("Clipboard", "copied line"), 10);
-    client.pushSequenced(try Source.event("Clipboard", "copied line"), 10);
-    try std.testing.expectEqual(@as(usize, 1), client.queue.items.len);
-    // A separate copy of the same sentence is a legitimate new reader entry.
-    client.pushSequenced(try Source.event("Clipboard", "copied line"), 11);
-    try std.testing.expectEqual(@as(usize, 2), client.queue.items.len);
-    // Changed content is preserved even if the clipboard changes during callbacks.
-    client.pushSequenced(try Source.event("Clipboard", "different line"), 11);
-    try std.testing.expectEqual(@as(usize, 3), client.queue.items.len);
-    // Never deduplicate game hooks or Console output, or assume sequence zero is valid.
-    client.pushSequenced(try Source.event("Console", "message"), 11);
-    client.pushSequenced(try Source.event("Console", "message"), 11);
-    client.pushSequenced(try Source.event("Clipboard", "copied line"), 0);
-    client.pushSequenced(try Source.event("Clipboard", "copied line"), 0);
-    try std.testing.expectEqual(@as(usize, 7), client.queue.items.len);
+test {
+    _ = @import("../../tests/components/textractor/textractor.zig").Tests(.{
+        .push = Client.push,
+        .pushSequenced = Client.pushSequenced,
+    });
 }

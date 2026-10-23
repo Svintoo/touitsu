@@ -41,8 +41,12 @@ See [dictionary implementation](docs/native-dictionaries.md), [Anki notes](docs/
 ## Checks
 
 ```powershell
+zig build test
+# Individual suites remain available:
 zig build test-anki test-hook-preview test-selection
 ```
+
+Unit and UI interaction tests live in `src/tests`, mirroring the application source folders. Components keep a small test registration block; suites that exercise private helpers receive those helpers through that block. `src/tests.zig` keeps `src` as Zig's import root for the individual suites. Test fixtures remain in `src/testdata`, and standalone smoke checks live in `src/checks` and `scripts`.
 
 ## Dependencies and credits
 
