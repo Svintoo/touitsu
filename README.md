@@ -30,14 +30,6 @@ zig build run
 
 The build packages both x86 and x64 hook backends. Keep the installed `x86` directory next to `Touitsu.exe`.
 
-## Dictionaries and Anki
-
-Place supported Yomitan dictionary ZIPs in the `dicts` folder next to the executable. Dictionary contents are supplied separately by the user.
-
-For Anki, install AnkiConnect, keep Anki running, and enable the integration in Touitsu. Choose a deck and note type, then edit the field templates under **Card formatting**. Online pronunciation is optional and requires enabling internet access in the settings.
-
-See [dictionary implementation](docs/native-dictionaries.md), [Anki notes](docs/anki.md), and [hook backend details](docs/textractor-backends.md).
-
 ## Checks
 
 ```powershell
